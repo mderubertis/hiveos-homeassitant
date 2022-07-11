@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# Executes gpu-stats and stores it to file
+# Runs inside screen with agent
+
+# MQTT settings
+NAME=$(hostname)
+BROKER="172.200.0.12"
+TOPIC_PREFIX="hiveos/rigs/$NAME"
+USER=""
+PASS=""
+
+# seconds since config
+SECONDS_FROM_CONFIG=0
+
+# Ensure mosquitto-clients is installed
+if [[ $(dpkg-query --showformat='${Version}' --show mosquitto-clients >/dev/null 2>&1 && echo $?) -gt 0 ]]; then
+    dpkg -s mosquitto-clients >/dev/null 2>&1 || apt update && apt install -y mosquitto-clients
+fi
+
+configure() {
+    # Configure sensors in Home Assistant
+    DISCOVERY_TOPIC="homeassistant/sensor/$NAME/uptime/config"
+    PAYLOAD="{\"device_class\":\"timestamp\",\"name\":\"$NAME Uptime\",\"state_topic\":\"$TOPIC_PREFIX/telemetry\",\"icon\":\"mdi:timer-outline\",\"unique_id\":\"$NAME-uptime\",\"qos\":1,\"value_template\":\"{{ (as_timestamp(now())-(value_json.uptime|int))|timestamp_local }}\",\"platform\":\"mqtt\",\"device\":{\"manufacturer\":\"$(dmidecode -s baseboard-manufacturer)\",\"name\":\"$NAME\",\"identifiers\":[\"$NAME\"],\"model\":\"$(dmidecode -s baseboard-product-name)\",\"sw_version\":\"$(dpkg-query --showformat='${Version}' --show hive)\"}}"
+    echo $PAYLOAD
+    mosquitto_pub -h $BROKER -t $DISCOVERY_TOPIC -m "$PAYLOAD"
+
+    sleep 0.2
+
+    DISCOVERY_TOPIC="homeassistant/sensor/$NAME/miner1/config"
+    PAYLOAD="{\"name\":\"$NAME Miner 1 Hashrate\",\"state_topic\":\"$TOPIC_PREFIX/miner1\",\"icon\":\"mdi:pickaxe\",\"unique_id\":\"$NAME-m1-hash\",\"qos\":1,\"value_template\":\"{{ value_json.total_khs }}\",\"unit_of_measurement\":\"kH/s\",\"json_attributes_topic\":\"$TOPIC_PREFIX/miner1/attributes\",\"platform\":\"mqtt\",\"device\":{\"manufacturer\":\"$(dmidecode -s baseboard-manufacturer)\",\"name\":\"$NAME\",\"identifiers\":[\"$NAME\"],\"model\":\"$(dmidecode -s baseboard-product-name)\",\"sw_version\":\"$(dpkg-query --showformat='${Version}' --show hive)\"}}"
+    echo $PAYLOAD
+    mosquitto_pub -h $BROKER -t $DISCOVERY_TOPIC -m "$PAYLOAD"
+
+    sleep 0.2
+
+    DISCOVERY_TOPIC="homeassistant/sensor/$NAME/miner2/config"
+    PAYLOAD="{\"name\":\"$NAME Miner 2 Hashrate\",\"state_topic\":\"$TOPIC_PREFIX/miner2\",\"icon\":\"mdi:pickaxe\",\"unique_id\":\"$NAME-m2-hash\",\"qos\":1,\"value_template\":\"{{ value_json.total_khs }}\",\"unit_of_measurement\":\"kH/s\",\"json_attributes_topic\":\"$TOPIC_PREFIX/miner2/attributes\",\"platform\":\"mqtt\",\"device\":{\"manufacturer\":\"$(dmidecode -s baseboard-manufacturer)\",\"name\":\"$NAME\",\"identifiers\":[\"$NAME\"],\"model\":\"$(dmidecode -s baseboard-product-name)\",\"sw_version\":\"$(dpkg-query --showformat='${Version}' --show hive)\"}}"
+    echo $PAYLOAD
+    mosquitto_pub -h $BROKER -t $DISCOVERY_TOPIC -m "$PAYLOAD"
+
+    sleep 0.2
+}
+
+
+update() {
+    # Stream logs to MQTT
+    tail -f /var/log/hive-agent.log | while read -r line; do
+        json_line=$(echo ${line} | awk -F'[<>]' {'print $2'})
+        if $(echo "$json_line" | jq -e 'has("method")'); then
+        	# Uptime
+        	PAYLOAD="{\"uptime\": $(awk '{print $1}' /proc/uptime)}"
+        	echo $PAYLOAD
+            mosquitto_pub -h $BROKER -t "$TOPIC_PREFIX/telemetry" -m "$PAYLOAD"
+            
+        	# Miner 1
+        	PAYLOAD="{\"total_khs\": $(jq -r '.params.total_khs' <<< $json_line)}"
+        	echo $PAYLOAD
+            mosquitto_pub -h $BROKER -t "$TOPIC_PREFIX/miner1" -m "$PAYLOAD"
+
+            PAYLOAD=$(echo $json_line | jq --arg miner $(jq -r '.params.miner' <<< $json_line) '.params.miner_stats += { miner: $miner }' | jq -r '.params.miner_stats')
+            echo $PAYLOAD
+            mosquitto_pub -h $BROKER -t "$TOPIC_PREFIX/miner1/attributes" -m "$PAYLOAD"
+
+            # Miner 2
+        	PAYLOAD="{\"total_khs\": $(jq -r '.params.total_khs2' <<< $json_line)}"
+            echo $PAYLOAD
+            mosquitto_pub -h $BROKER -t "$TOPIC_PREFIX/miner2" -m "$PAYLOAD"
+
+            PAYLOAD=$(echo $json_line | jq --arg miner $(jq -r '.params.miner2' <<< $json_line) '.params.miner_stats2 += { miner: $miner }' | jq -r '.params.miner_stats2')
+            echo $PAYLOAD
+            mosquitto_pub -h $BROKER -t "$TOPIC_PREFIX/miner2/attributes" -m "$PAYLOAD"
+
+            #PAYLOAD=$(jq --arg uptime $(awk '{print $1}' /proc/uptime) '. += { uptime: $uptime }' <<< $json_line)
+        fi
+    done
+}
+
+case $1 in
+    update)
+        update
+        exit
+    ;;
+
+    configure)
+        while true; do 
+            configure 
+            sleep 5;
+        done
+        exit
+    ;;
+esac
+
+
+exit 0 #all was running
